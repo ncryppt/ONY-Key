@@ -1,0 +1,73 @@
+name: Windows Build
+
+# Manual trigger: run from the Actions tab (or `gh workflow run build-windows.yml`)
+# whenever a Windows build is needed for a release. Not run on every push,
+# since it's slow (full JUCE compile) and only needed for release cuts.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to attach the build to (e.g. v0.0.1). Leave blank to just upload as a workflow artifact."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout (with JUCE submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # CMake's Visual Studio generator relies on locating a VS install via
+      # vswhere, which has proven flaky on hosted runners. Loading the MSVC
+      # dev environment directly and building with Ninja sidesteps that
+      # entirely — cl.exe/link.exe just need to be on PATH.
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (VST3 + Standalone)
+        run: cmake --build build --target ONYKey_VST3 --target ONYKey_Standalone -j 4
+
+      - name: Run key-detection unit tests
+        run: |
+          cmake --build build --target ONYKeyTests -j 4
+          ctest --test-dir build --output-on-failure
+
+      - name: Package VST3
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build/ONYKey_artefacts/Release/VST3/ONY Key.vst3" -DestinationPath "ONY-Key-VST3-Windows.zip"
+
+      - name: Package Standalone
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build/ONYKey_artefacts/Release/Standalone/ONY Key.exe" -DestinationPath "ONY-Key-Standalone-Windows.zip"
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ONY-Key-Windows-build
+          path: |
+            ONY-Key-VST3-Windows.zip
+            ONY-Key-Standalone-Windows.zip
+
+      - name: Attach to GitHub Release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.inputs.release_tag }}" ONY-Key-VST3-Windows.zip ONY-Key-Standalone-Windows.zip --clobber
