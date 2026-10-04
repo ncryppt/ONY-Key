@@ -25,13 +25,15 @@ inline bool isSupportedAudioFile (const juce::File& f)
 
     `shouldStop` is polled between chunks so a newer drop can cancel an
     older analysis. `onProgress` gets 0..1. `configure` can adjust the
-    detector's tunables (used by the evaluation tool). Returns nullopt if
+    detector's tunables and `evidenceOut` receives the raw evidence (both
+    for the evaluation tool). Returns nullopt if
     the file can't be decoded or the analysis was cancelled. */
 inline std::optional<KeyResult> analyseAudioFile (const juce::File& file,
                                                   juce::AudioFormatManager& formats,
                                                   const std::function<bool()>& shouldStop = {},
                                                   const std::function<void (float)>& onProgress = {},
-                                                  const std::function<void (KeyDetector&)>& configure = {})
+                                                  const std::function<void (KeyDetector&)>& configure = {},
+                                                  KeyDetector::Evidence* evidenceOut = nullptr)
 {
     std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
     if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
@@ -77,6 +79,8 @@ inline std::optional<KeyResult> analyseAudioFile (const juce::File& file,
     }
 
     detector.flush();
+    if (evidenceOut != nullptr)
+        *evidenceOut = detector.getEvidence();
     return detector.computeResult();
 }
 

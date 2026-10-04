@@ -1,5 +1,43 @@
 # Progress Log
 
+## v0.1.1: learned key model (2026-10-04)
+
+The hand-tuned profile matcher was replaced by a small learned model, after
+building an evaluation that can actually tell a better detector from a luckier
+one.
+
+- **Data.** `scripts/build_eval_manifest.py`: 1,759 key-labelled loops from 15
+  sample packs (filename and folder labels, drums/FX/vocals excluded), the
+  GiantSteps Key benchmark (604 EDM tracks, downloaded from the dataset
+  authors' server with checksums; 5 fixed folds), 432 rendered textbook
+  progressions (`make_synthetic_progressions.py`; 12 progression types x 12
+  keys x 3 sounds), and 2,817 labelled one-shot string notes for root-note
+  accuracy.
+- **Evidence.** The detector now also keeps a middle-register (200 Hz–1 kHz)
+  histogram; `ONYKeyFeatures` dumps all of it per file.
+- **Model.** `scripts/train_key_model.py`: rotation-invariant softmax over the
+  24 keys, a 16-unit network per mode over per-register chroma (bass / mid /
+  high / all, rotated to each tonic) plus Sha'ath-profile correlations. Its
+  weights are emitted as `Source/DSP/KeyModel.h`, and C++ matches Python on
+  98.9% of files (the rest are near-ties).
+- **Evaluation.** Always held out by pack / GiantSteps fold / progression type.
+  Final: GiantSteps 74.7% MIREX (was 66.2%), 68.2% exact (was 58.9%); packs
+  55.3% exact (was 47.8%); unseen progression types 67% exact (90% key or
+  relative); one-shot roots 91.8% (was 93.0%). Confidence is the model's
+  probability and is calibrated (85%+ right 87% of the time); the
+  High/Good/Fair/Low thresholds follow it.
+- **Trade-off, accepted:** the model learned that ~83% of electronic music is
+  minor, so it's weaker on major keys (GiantSteps major ~23%, packs ~44%). No
+  variant tried beat the old detector with major and minor weighted equally.
+- **Lessons recorded:**
+  - A model trained only on real music read every textbook I–IV–V–I in its
+    subdominant (unseen progressions 38%). The synthetic progressions fixed
+    that at no cost to real-world accuracy.
+  - Tried with no gain: opening-2-s chroma (tonic cue), a 24-triad chord
+    histogram, and other overtone/peak settings (the current defaults were
+    best on GiantSteps too).
+  - MTG-Key audio is no longer available from Beatport.
+
 ## Particles (2026-10-02)
 
 - ONY Verb's ParticleOverlay ported (`Source/UI/ParticleOverlay.h`), with the

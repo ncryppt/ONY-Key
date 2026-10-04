@@ -3,8 +3,7 @@
 // and reports how often it agrees, MIREX-style:
 //   exact = 1, fifth above/below = 0.5, relative major/minor = 0.3, parallel = 0.2
 //
-//   ONYKeyEval [--verbose] [--dump] [--bass 0.35] [--tbass 0.2] [--minor 0.04]
-//              [--harm 0] [--prom 6] [--other 0.22] <folder or file>...
+//   ONYKeyEval [--verbose] [--dump] [--harm 0] [--prom 6] [--other 0.22] <folder or file>...
 //
 // Prints major- and minor-labelled accuracy separately: sample packs are
 // overwhelmingly minor, so overall accuracy alone would reward a detector that
@@ -103,15 +102,9 @@ int main (int argc, char* argv[])
     {
         for (const auto& [name, value] : overrides)
         {
-            if      (name == "bass")  d.bassWeight = value;
-            else if (name == "tbass") d.tonicBassBonus = value;
-            else if (name == "minor") d.minorBias = value;
-            else if (name == "harm")  d.harmonicSuppression = value;
+            if      (name == "harm")  d.harmonicSuppression = value;
             else if (name == "prom")  d.prominenceDb = value;
             else if (name == "other") d.rootNoteOtherThreshold = (float) value;
-            else if (name == "conflow")    d.confidenceScoreLow = (float) value;
-            else if (name == "confhigh")   d.confidenceScoreHigh = (float) value;
-            else if (name == "confmargin") d.confidenceMarginFull = (float) value;
             else std::cerr << "Unknown option --" << name << "\n";
         }
     };
