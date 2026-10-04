@@ -209,11 +209,14 @@ private:
         }
     }
 
+    /** The confidence is the model's own probability, calibrated on
+        held-out data: >= 85% was right 87% of the time, 70-85% 77%,
+        50-70% 57%, below that 42% or less. */
     static juce::String confidenceWord (float c)
     {
-        if (c >= 0.8f) return "High";
-        if (c >= 0.6f) return "Good";
-        if (c >= 0.4f) return "Fair";
+        if (c >= 0.85f) return "High";
+        if (c >= 0.70f) return "Good";
+        if (c >= 0.50f) return "Fair";
         return "Low";
     }
 

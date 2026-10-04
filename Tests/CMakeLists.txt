@@ -84,3 +84,31 @@ target_link_libraries(ONYKeySnapshot PRIVATE
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
 )
+
+# Feature dump for training/evaluating the key model (not part of ctest):
+# runs a manifest of labelled files through the real analysis path and writes
+# the detector's evidence per file. See scripts/train_key_model.py.
+juce_add_console_app(ONYKeyFeatures
+    PRODUCT_NAME "ONYKeyFeatures"
+)
+
+target_sources(ONYKeyFeatures PRIVATE
+    KeyFeatures.cpp
+)
+
+target_include_directories(ONYKeyFeatures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../Source)
+
+target_compile_definitions(ONYKeyFeatures PRIVATE
+    JUCE_STANDALONE_APPLICATION=1
+    JUCE_USE_MP3AUDIOFORMAT=1
+)
+
+target_link_libraries(ONYKeyFeatures PRIVATE
+    juce::juce_core
+    juce::juce_audio_basics
+    juce::juce_audio_formats
+    juce::juce_dsp
+    juce::juce_events
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_warning_flags
+)

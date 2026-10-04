@@ -8,6 +8,7 @@
 #include <cmath>
 #include <complex>
 #include <vector>
+#include "KeyModel.h"
 
 namespace onykey
 {
@@ -33,7 +34,7 @@ struct KeyResult
     double secondsAnalysed = 0.0;
 
     std::array<float, 12> chroma {};     // pitch-class energy, max = 1
-    std::array<float, 24> keyScores {};  // match score per key (higher = better)
+    std::array<float, 24> keyScores {};  // probability per key (sums to 1)
 
     bool isValid() const noexcept { return kind != Kind::None; }
 };
@@ -49,16 +50,23 @@ struct KeyResult
       -> overtones that aren't octaves (3rd, 5th, 7th harmonic...) of a louder
          lower peak are dropped: the 5th harmonic of a bass note is a major
          third, and it's the main reason naive detectors call minor loops major
-      -> peaks folded into a 10-cent pitch-class histogram (+ a separate one
-         for the bass register)
+      -> peaks folded into 10-cent pitch-class histograms for the whole
+         range, the bass (< 200 Hz) and the middle register (200 Hz - 1 kHz)
       -> tuning offset estimated at the end and folded out, so detuned
          samples still land on the right notes
-      -> 12-bin chroma correlated against 24 rotated key profiles (Sha'ath),
-         plus a bonus for keys whose tonic is the dominant bass note, plus a
-         small prior towards minor.
+      -> a small learned model (KeyModel.h) scores all 24 keys from the
+         per-register chroma, rotated to each candidate tonic, plus its
+         correlation with Sha'ath's key profiles; a softmax turns the scores
+         into probabilities, and the winner's probability is the confidence.
 
-    The defaults were tuned against ~1,600 key-labelled loops from
-    commercial sample packs (see Tests/KeyEval.cpp).
+    The model was trained and evaluated with scripts/train_key_model.py on
+    ~2,800 labelled files (sample-pack loops, the GiantSteps Key EDM
+    benchmark, and rendered textbook progressions in all 24 keys), always
+    scoring on packs / folds / progression types held out from training.
+    Held out, it scores 74.7% on GiantSteps' weighted (MIREX) score vs 66.2%
+    for the previous hand-tuned profile matcher, and reads 67% of chord
+    progressions it never heard (90% as the key or its relative); its
+    confidence is calibrated (an 85%+ answer was right 87% of the time).
 
     Pure juce_core/juce_dsp: no plugin or GUI dependency, so the plugin's
     live "listen" path, the file analyser and the unit tests all run the
@@ -77,17 +85,12 @@ public:
     static constexpr double minFrequency = 40.0;   // ~E1, covers 808s/sub bass
     static constexpr double maxFrequency = 4200.0; // ~C8
     static constexpr double bassCutoffHz = 200.0;
+    static constexpr double midCutoffHz = 1000.0;
 
     // Tunables, public for the evaluation tool. Defaults are the tuned values.
-    double bassWeight = 0.35;            // bass-register chroma blended into the full one
-    double tonicBassBonus = 0.2;         // score bonus for a key whose tonic is the main bass note
-    double minorBias = 0.04;             // prior towards minor (most electronic music is)
     double harmonicSuppression = 0.0;    // weight left on a non-octave overtone (0 = removed)
     double prominenceDb = 6.0;           // how far a peak must rise above its neighbourhood
     float rootNoteOtherThreshold = 0.22f;
-
-    // Confidence mapping, calibrated with Tests/KeyEval.cpp.
-    float confidenceScoreLow = 0.5f, confidenceScoreHigh = 1.2f, confidenceMarginFull = 0.4f;
 
     KeyDetector() : fft (fftOrder)
     {
@@ -136,6 +139,7 @@ public:
         samplesSinceLastFrame = 0;
         fineHistogram.fill (0.0);
         bassHistogram.fill (0.0);
+        midHistogram.fill (0.0);
         analysedSamples = 0;
         tonalFrames = 0;
     }
@@ -181,6 +185,30 @@ public:
 
     double getSecondsAnalysed() const noexcept { return (double) analysedSamples / analysisRate; }
 
+    /** Raw evidence, for the evaluation/training tools: 10-cent pitch-class
+        histograms for the whole range, the bass (< 200 Hz) and the middle
+        register (200 Hz - 1 kHz). */
+    struct Evidence
+    {
+        std::array<double, numFineBins> all {}, bass {}, mid {};
+        int tonalFrames = 0;
+    };
+
+    Evidence getEvidence() const
+    {
+        return { fineHistogram, bassHistogram, midHistogram, tonalFrames };
+    }
+
+    /** Where, within a semitone, the energy sits: -0.5..0.5 semitones. */
+    double estimateTuning() const
+    {
+        std::complex<double> phasor;
+        for (int b = 0; b < numFineBins; ++b)
+            phasor += fineHistogram[(size_t) b]
+                      * std::polar (1.0, juce::MathConstants<double>::twoPi * (double) b / (double) binsPerSemitone);
+        return std::arg (phasor) / juce::MathConstants<double>::twoPi;
+    }
+
     KeyResult computeResult() const
     {
         KeyResult result;
@@ -193,43 +221,26 @@ public:
         if (total <= 1.0e-9 || tonalFrames == 0)
             return result;
 
-        // --- Tuning: where, within a semitone, does the energy sit? ---------
-        std::complex<double> phasor;
-        for (int b = 0; b < numFineBins; ++b)
-            phasor += fineHistogram[(size_t) b]
-                      * std::polar (1.0, juce::MathConstants<double>::twoPi * (double) b / (double) binsPerSemitone);
-
-        const double tuningSemitones = std::arg (phasor) / juce::MathConstants<double>::twoPi; // -0.5..0.5
+        const double tuningSemitones = estimateTuning();
         result.tuningCents = (float) (tuningSemitones * 100.0);
 
-        // --- Fold to 12 pitch classes, tuning removed -----------------------
-        std::array<double, 12> chroma {}, bass {};
+        // --- Fold to 12 pitch classes per register, tuning removed ----------
+        std::array<double, 12> chroma {}, bass {}, mid {};
         for (int b = 0; b < numFineBins; ++b)
         {
             const double semis = (double) b / (double) binsPerSemitone - tuningSemitones;
             const auto pc = (size_t) (((int) std::lround (semis) % 12 + 12) % 12);
             chroma[pc] += fineHistogram[(size_t) b];
             bass[pc] += bassHistogram[(size_t) b];
+            mid[pc] += midHistogram[(size_t) b];
         }
 
         const double chromaMax = *std::max_element (chroma.begin(), chroma.end());
-        const double bassMax = *std::max_element (bass.begin(), bass.end());
-
         for (size_t i = 0; i < 12; ++i)
             result.chroma[i] = (float) (chroma[i] / chromaMax);
 
-        // --- Score every key ------------------------------------------------
-        std::array<double, 12> weighted {};
-        for (size_t i = 0; i < 12; ++i)
-            weighted[i] = chroma[i] / chromaMax + (bassMax > 0.0 ? bassWeight * bass[i] / bassMax : 0.0);
-
-        for (int key = 0; key < 24; ++key)
-        {
-            const auto tonic = (size_t) (key % 12);
-            result.keyScores[(size_t) key] = (float) (correlate (weighted, key)
-                                                      + (bassMax > 0.0 ? tonicBassBonus * bass[tonic] / bassMax : 0.0)
-                                                      + (key >= 12 ? minorBias : 0.0));
-        }
+        // --- Score every key with the learned model -------------------------
+        result.keyScores = scoreKeys (chroma, bass, mid);
 
         int best = 0, second = 1;
         if (result.keyScores[1] > result.keyScores[0])
@@ -251,11 +262,8 @@ public:
         result.key = best;
         result.altKey = second;
         result.rootNote = best % 12;
-
-        const float s1 = result.keyScores[(size_t) best];
-        const float s2 = result.keyScores[(size_t) second];
-        result.confidence = juce::jlimit (0.0f, 1.0f, 0.5f * juce::jmap (s1, confidenceScoreLow, confidenceScoreHigh, 0.0f, 1.0f)
-                                                      + 0.5f * juce::jmap (s1 - s2, 0.0f, confidenceMarginFull, 0.0f, 1.0f));
+        // The model's own probability, which is calibrated on held-out packs.
+        result.confidence = result.keyScores[(size_t) best];
 
         // --- One note (plus its own overtones) only? ------------------------
         // A single pitched sound puts its energy on its root and, through any
@@ -282,6 +290,86 @@ public:
     }
 
 private:
+    /** Per-register chroma -> the model's input for each candidate tonic,
+        and the softmax over all 24 keys. Must match features() / rotations()
+        in scripts/train_key_model.py exactly. */
+    static std::array<float, 24> scoreKeys (const std::array<double, 12>& all, const std::array<double, 12>& bass,
+                                            const std::array<double, 12>& mid)
+    {
+        // Bands in model order: bass, mid, high, all. Each max-normalised,
+        // square-root compressed and mean-centred.
+        std::array<std::array<double, 12>, 4> bands {};
+        for (size_t i = 0; i < 12; ++i)
+        {
+            bands[0][i] = bass[i];
+            bands[1][i] = mid[i];
+            bands[2][i] = juce::jmax (0.0, all[i] - bass[i] - mid[i]);
+            bands[3][i] = all[i];
+        }
+        for (auto& band : bands)
+        {
+            const double peak = *std::max_element (band.begin(), band.end());
+            double mean = 0.0;
+            for (auto& v : band)
+            {
+                v = peak > 0.0 ? std::sqrt (v / peak) : 0.0;
+                mean += v;
+            }
+            mean /= 12.0;
+            for (auto& v : band)
+                v -= mean;
+        }
+
+        std::array<double, 12> mix {};
+        for (size_t i = 0; i < 12; ++i)
+            mix[i] = bands[3][i] + 0.35 * bands[0][i];
+
+        std::array<double, 24> logits {};
+        std::array<float, (size_t) model::inputs> x {};
+
+        for (int tonic = 0; tonic < 12; ++tonic)
+        {
+            // Rotate so the candidate tonic sits at index 0.
+            for (size_t band = 0; band < 4; ++band)
+                for (int i = 0; i < 12; ++i)
+                    x[band * 12 + (size_t) i] = (float) bands[band][(size_t) ((i + tonic) % 12)];
+
+            if constexpr (model::usesCorrelations)
+            {
+                x[48] = (float) correlate (bands[3], tonic);
+                x[49] = (float) correlate (bands[3], 12 + tonic);
+                x[50] = (float) correlate (mix, tonic);
+                x[51] = (float) correlate (mix, 12 + tonic);
+            }
+
+            for (int mode = 0; mode < 2; ++mode)
+            {
+                double score = model::b2[mode];
+                for (int h = 0; h < model::hidden; ++h)
+                {
+                    double z = model::b1[mode][h];
+                    for (int d = 0; d < model::inputs; ++d)
+                        z += (double) model::W1[mode][d][h] * x[(size_t) d];
+                    score += (double) model::w2[mode][h] * (model::linear ? z : juce::jmax (0.0, z));
+                }
+                logits[(size_t) (mode * 12 + tonic)] = score;
+            }
+        }
+
+        const double top = *std::max_element (logits.begin(), logits.end());
+        double sum = 0.0;
+        std::array<double, 24> e {};
+        for (size_t k = 0; k < 24; ++k)
+        {
+            e[k] = std::exp (logits[k] - top);
+            sum += e[k];
+        }
+        std::array<float, 24> p {};
+        for (size_t k = 0; k < 24; ++k)
+            p[k] = (float) (e[k] / sum);
+        return p;
+    }
+
     /** Sha'ath's profiles (from libKeyFinder), which scored best on
         electronic loops among Krumhansl-Kessler, Temperley, Albrecht-Shanahan
         and Faraldo's EDMA. */
@@ -416,6 +504,8 @@ private:
 
             if (peak.freq < bassCutoffHz)
                 addToHistogram (bassHistogram, midi, weight);
+            else if (peak.freq < midCutoffHz)
+                addToHistogram (midHistogram, midi, weight);
 
             anyPeak = true;
         }
@@ -423,6 +513,7 @@ private:
         if (anyPeak)
             ++tonalFrames;
     }
+
 
     struct Peak
     {
@@ -480,6 +571,7 @@ private:
 
     std::array<double, numFineBins> fineHistogram {};
     std::array<double, numFineBins> bassHistogram {};
+    std::array<double, numFineBins> midHistogram {};  // 200 Hz - 1 kHz
 };
 
 } // namespace onykey
